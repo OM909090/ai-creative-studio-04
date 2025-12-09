@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { ChatMessage } from '@/types/editor';
-import { Sparkles, Send, Bot, User, Loader2 } from 'lucide-react';
+import { Sparkles, Send, Bot, User, Loader2, Zap } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface AIAssistantProps {
@@ -31,10 +31,12 @@ export function AIAssistant({ messages, isLoading, onSendMessage }: AIAssistantP
   };
 
   const suggestions = [
-    'Make it more vibrant',
-    'Add a warm vintage look',
-    'Increase contrast by 20%',
-    'Apply a cinematic filter',
+    'Make it look like a sunset',
+    'Add a vintage film look',
+    'Remove blue tint, add warmth',
+    'Dramatic black and white',
+    'Bright and airy style',
+    'Moody cinematic look',
   ];
 
   return (
@@ -47,8 +49,11 @@ export function AIAssistant({ messages, isLoading, onSendMessage }: AIAssistantP
           </div>
         </div>
         <div>
-          <h3 className="font-semibold text-sm">AI Assistant</h3>
-          <p className="text-xs text-muted-foreground">Powered by AI</p>
+          <h3 className="font-semibold text-sm flex items-center gap-1.5">
+            AI Assistant
+            <Zap className="w-3 h-3 text-primary" />
+          </h3>
+          <p className="text-xs text-muted-foreground">Powered by Gemini</p>
         </div>
       </div>
 
@@ -57,16 +62,18 @@ export function AIAssistant({ messages, isLoading, onSendMessage }: AIAssistantP
           <div className="space-y-4">
             <div className="glass-panel rounded-xl p-4 space-y-3 animate-fade-in">
               <p className="text-sm text-muted-foreground">
-                Hi! I'm your AI editing assistant. Describe what you'd like to do with your image, and I'll help you achieve it.
+                Hi! I'm your AI editing assistant powered by <span className="text-primary font-medium">Gemini</span>. 
+                Describe any creative vision and I'll translate it into precise adjustments.
               </p>
               <div className="space-y-2">
-                <p className="text-xs text-muted-foreground/70 uppercase tracking-wide">Try saying:</p>
+                <p className="text-xs text-muted-foreground/70 uppercase tracking-wide">Try these:</p>
                 <div className="flex flex-wrap gap-2">
                   {suggestions.map((suggestion) => (
                     <button
                       key={suggestion}
                       onClick={() => onSendMessage(suggestion)}
-                      className="text-xs px-3 py-1.5 rounded-full bg-secondary hover:bg-secondary/80 text-secondary-foreground transition-colors"
+                      disabled={isLoading}
+                      className="text-xs px-3 py-1.5 rounded-full bg-secondary hover:bg-secondary/80 text-secondary-foreground transition-colors disabled:opacity-50"
                     >
                       {suggestion}
                     </button>
@@ -98,13 +105,13 @@ export function AIAssistant({ messages, isLoading, onSendMessage }: AIAssistantP
                       : 'glass-panel'
                   )}
                 >
-                  <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-                  {message.isLoading && (
-                    <div className="flex items-center gap-1 mt-2">
-                      <div className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <div className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <div className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                  {message.isLoading ? (
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                      <span className="text-sm text-muted-foreground">Analyzing your request...</span>
                     </div>
+                  ) : (
+                    <p className="text-sm whitespace-pre-wrap">{message.content}</p>
                   )}
                 </div>
                 {message.role === 'user' && (
@@ -123,7 +130,7 @@ export function AIAssistant({ messages, isLoading, onSendMessage }: AIAssistantP
           <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Describe your edit..."
+            placeholder="Describe your creative vision..."
             disabled={isLoading}
             className="bg-secondary/50 border-border/50 focus:border-primary/50"
           />

@@ -11,6 +11,7 @@ import { Sliders, Wand2, PanelRightOpen, PanelRightClose } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { processAIEditCommand } from '@/lib/ai-edit';
 
 export function EditorLayout() {
   const editor = useImageEditor();
@@ -29,47 +30,6 @@ export function EditorLayout() {
     }
   };
 
-  const parseAICommand = useCallback((text: string): Partial<ImageAdjustments> | null => {
-    const lower = text.toLowerCase();
-    const adjustments: Partial<ImageAdjustments> = {};
-
-    // Parse percentage values
-    const percentMatch = lower.match(/(\d+)\s*%/);
-    const value = percentMatch ? parseInt(percentMatch[1]) : 20;
-
-    if (lower.includes('bright')) {
-      adjustments.brightness = lower.includes('decrease') || lower.includes('reduce') ? -value : value;
-    }
-    if (lower.includes('contrast')) {
-      adjustments.contrast = lower.includes('decrease') || lower.includes('reduce') ? -value : value;
-    }
-    if (lower.includes('saturate') || lower.includes('saturation') || lower.includes('vibrant')) {
-      adjustments.saturation = lower.includes('decrease') || lower.includes('reduce') || lower.includes('desaturate') ? -value : value;
-    }
-    if (lower.includes('warm')) {
-      adjustments.temperature = value;
-      adjustments.saturation = Math.round(value / 2);
-    }
-    if (lower.includes('cool')) {
-      adjustments.temperature = -value;
-    }
-    if (lower.includes('vintage')) {
-      adjustments.saturation = -20;
-      adjustments.temperature = 15;
-      adjustments.contrast = -10;
-    }
-    if (lower.includes('dramatic') || lower.includes('cinematic')) {
-      adjustments.contrast = 40;
-      adjustments.saturation = -10;
-    }
-    if (lower.includes('noir') || lower.includes('black and white')) {
-      adjustments.saturation = -100;
-      adjustments.contrast = 30;
-    }
-
-    return Object.keys(adjustments).length > 0 ? adjustments : null;
-  }, []);
-
   const handleAIMessage = useCallback(async (userMessage: string) => {
     if (!editor.state.image) {
       toast.error('Please upload an image first');
@@ -86,7 +46,7 @@ export function EditorLayout() {
     setMessages((prev) => [...prev, userMsg]);
     setIsAILoading(true);
 
-    // Simulate AI processing
+    // Add loading message
     const loadingMsg: ChatMessage = {
       id: (Date.now() + 1).toString(),
       role: 'assistant',
@@ -96,37 +56,52 @@ export function EditorLayout() {
     };
     setMessages((prev) => [...prev, loadingMsg]);
 
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    // Parse and apply the command
-    const adjustments = parseAICommand(userMessage);
-    
-    let responseText: string;
-    
-    if (adjustments) {
-      // Apply the adjustments
-      Object.entries(adjustments).forEach(([key, value]) => {
-        editor.updateAdjustment(key as keyof ImageAdjustments, value as number);
-      });
-
-      const adjustmentList = Object.entries(adjustments)
-        .map(([key, value]) => `${key}: ${value > 0 ? '+' : ''}${value}`)
-        .join(', ');
+    try {
+      // Call the AI edge function
+      const response = await processAIEditCommand(userMessage, editor.state.adjustments);
       
-      responseText = `Done! I've applied the following adjustments: ${adjustmentList}. Let me know if you'd like to refine the look further.`;
-    } else {
-      responseText = `I understand you want to "${userMessage}". Try being more specific like "increase brightness by 30%" or "add a warm vintage look". I can adjust brightness, contrast, saturation, temperature, and more!`;
-    }
+      // Apply the adjustments
+      if (response.adjustments) {
+        Object.entries(response.adjustments).forEach(([key, value]) => {
+          if (typeof value === 'number') {
+            editor.updateAdjustment(key as keyof ImageAdjustments, value);
+          }
+        });
+      }
 
-    setMessages((prev) => 
-      prev.map((msg) =>
-        msg.id === loadingMsg.id
-          ? { ...msg, content: responseText, isLoading: false }
-          : msg
-      )
-    );
-    setIsAILoading(false);
-  }, [editor, parseAICommand]);
+      // Apply filter if specified
+      if (response.filter && response.filter !== 'none') {
+        editor.applyFilter(response.filter);
+      }
+
+      // Update the loading message with the response
+      setMessages((prev) => 
+        prev.map((msg) =>
+          msg.id === loadingMsg.id
+            ? { ...msg, content: response.explanation || 'Adjustments applied!', isLoading: false }
+            : msg
+        )
+      );
+
+      toast.success('AI edits applied!');
+    } catch (error) {
+      console.error('AI edit error:', error);
+      
+      const errorMessage = error instanceof Error ? error.message : 'Failed to process your request';
+      
+      setMessages((prev) => 
+        prev.map((msg) =>
+          msg.id === loadingMsg.id
+            ? { ...msg, content: `Sorry, I couldn't process that request: ${errorMessage}. Try being more specific about the adjustments you want.`, isLoading: false }
+            : msg
+        )
+      );
+      
+      toast.error(errorMessage);
+    } finally {
+      setIsAILoading(false);
+    }
+  }, [editor]);
 
   return (
     <div className="flex flex-col h-screen bg-background overflow-hidden">
