@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -6,6 +6,7 @@ import { Slider } from '@/components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { apiService } from '@/lib/api';
 import {
   Wand2,
   Upload,
@@ -24,7 +25,6 @@ import {
   Layers,
   Clock,
   RotateCcw,
-  Bot,
   ArrowLeft,
   Link2,
   Sun,
@@ -47,13 +47,38 @@ import {
   MonitorPlay,
   Subtitles,
   Mic,
+
   VolumeOff,
   Waves,
   Loader2,
+  PlayCircle,
+  Minimize2,
+
   Youtube,
 } from 'lucide-react';
+
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ShortsShowcase, GeneratedShort } from './ShortsShowcase';
+import { VideoAIAssistant } from './VideoAIAssistant';
+
+interface ClipDetail {
+  clip_number: number;
+  start_time: number;
+  end_time: number;
+  duration: number;
+  filename: string;
+  size_mb: number;
+}
 
 interface VideoState {
   src: string | null;
@@ -127,13 +152,26 @@ export function VideoEditorLayout() {
   const [importSource, setImportSource] = useState<'local' | 'youtube' | null>(null);
   const [showVideoControls, setShowVideoControls] = useState(true);
   const [controlsTimeout, setControlsTimeout] = useState<NodeJS.Timeout | null>(null);
+
+
   const [isFullscreen, setIsFullscreen] = useState(false);
-  
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isProgressMinimized, setIsProgressMinimized] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState({
+    percentage: 0,
+    message: '',
+    threadsUsed: 0,
+    estimatedTimeRemaining: 0,
+    elapsedTime: 0,
+    totalClips: 0,
+    currentClip: 0,
+  });
+
   // Default demo video URL (using a sample video)
   const defaultDemoVideo = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
-  
+
   const [videoState, setVideoState] = useState<VideoState>({
-    src: defaultDemoVideo, // Start with demo video
+    src: defaultDemoVideo,
     duration: 0,
     currentTime: 0,
     isPlaying: false,
@@ -182,7 +220,7 @@ export function VideoEditorLayout() {
         setVideoState((prev) => ({ ...prev, isPlaying: true }));
       }
     }, 500);
-    
+
     return () => clearTimeout(timer);
   }, []);
 
@@ -222,7 +260,7 @@ export function VideoEditorLayout() {
       setImportSource('youtube');
       setIsYoutubeImporting(false);
       toast.success('YouTube video imported successfully!');
-      
+
       // Auto-trigger shorts generation for YouTube imports
       generateShorts();
     }, 2000);
@@ -235,22 +273,57 @@ export function VideoEditorLayout() {
     }
 
     setIsGeneratingShorts(true);
-    
+
+
+    // Reset progress state at the start
+    setIsProgressMinimized(false);
+    setGenerationProgress({
+      percentage: 0,
+      message: 'Initializing...',
+      threadsUsed: 0,
+      estimatedTimeRemaining: 0,
+      elapsedTime: 0,
+      totalClips: 0,
+      currentClip: 0,
+    });
+
     // Start polling for progress updates
     let progressToastId: string | number | undefined;
+    let pollInterval: NodeJS.Timeout | null = null;
+
     const pollProgress = async () => {
       try {
-        const progressResponse = await fetch('http://localhost:5000/progress', {
-          signal: AbortSignal.timeout(5000), // 5 second timeout
-        });
-        
-        if (!progressResponse.ok) {
-          console.error('Progress endpoint returned error:', progressResponse.status);
+        const result = await apiService.getProgress();
+
+        if (!result.success) {
+          console.error('Progress endpoint error:', result.error);
           return;
         }
-        
-        const progress = await progressResponse.json();
-        
+
+        const progress = result.data;
+
+        // Update progress state
+        setGenerationProgress({
+          percentage: progress.progress || 0,
+          message: progress.message || 'Processing...',
+          threadsUsed: progress.threads_used || 0,
+          estimatedTimeRemaining: progress.estimated_time_remaining || 0,
+          elapsedTime: progress.elapsed_time || 0,
+          totalClips: progress.total_clips || 0,
+          currentClip: progress.current_clip || 0,
+        });
+
+        // Debug logging for progress updates
+        console.log('Progress update:', {
+          status: progress.status,
+          progress: progress.progress,
+          message: progress.message,
+          threads: progress.threads_used,
+          elapsed: progress.elapsed_time,
+          totalClips: progress.total_clips,
+          currentClip: progress.current_clip
+        });
+
         // Update toast with current progress
         if (progress.status === 'downloading') {
           if (!progressToastId) {
@@ -264,59 +337,52 @@ export function VideoEditorLayout() {
             });
           }
         } else if (progress.status === 'processing') {
+          const eta = progress.estimated_time_remaining ? ` | ETA: ${progress.estimated_time_remaining}s` : '';
+          const threads = progress.threads_used ? ` | Threads: ${progress.threads_used}` : '';
+          const clipInfo = progress.total_clips > 0 && progress.current_clip > 0
+            ? `Clip ${progress.current_clip}/${progress.total_clips}${threads}${eta}`
+            : `${progress.progress}% complete`;
           toast.loading(progress.message, {
             id: progressToastId,
-            description: progress.total_clips > 0 
-              ? `Clip ${progress.current_clip}/${progress.total_clips} - ${progress.progress}% complete`
-              : `${progress.progress}% complete`
+            description: clipInfo
           });
         }
-        
-        // Continue polling if not complete or error
-        if (progress.status !== 'complete' && progress.status !== 'error' && progress.status !== 'idle') {
-          setTimeout(pollProgress, 1000); // Poll every second
+
+        // Stop polling if complete or error
+        if (progress.status === 'complete' || progress.status === 'error') {
+          if (pollInterval) {
+            clearInterval(pollInterval);
+            pollInterval = null;
+          }
         }
       } catch (error) {
         console.error('Error polling progress:', error);
-        // Don't show error to user, just stop polling
       }
     };
-    
-    // Start progress polling
-    setTimeout(pollProgress, 500);
+
+    // Start progress polling every 1 second
+    pollInterval = setInterval(pollProgress, 1000);
+
+    // Initial poll
+    pollProgress();
 
     try {
       // Check if backend is accessible
-      try {
-        await fetch('http://localhost:5000/progress');
-      } catch (error) {
+      const isAvailable = await apiService.isBackendAvailable();
+      if (!isAvailable) {
         throw new Error('Backend server is not running. Please start the Python server on port 5000.');
       }
 
-      const response = await fetch('http://localhost:5000/generate_shorts', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          url: youtubeUrl,
-          output_dir: 'all_30sec_shorts'
-        }),
-      });
+      const result = await apiService.generateShorts(youtubeUrl, 'all_30sec_shorts');
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Server error (${response.status}): ${errorText}`);
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to generate shorts');
       }
 
-      const report = await response.json();
-
-      if (report.error) {
-        throw new Error(report.error);
-      }
+      const report = result.data;
 
       // Convert the report clips to GeneratedShort format
-      const shorts: GeneratedShort[] = report.clip_details.map((clip: any, index: number) => ({
+      const shorts: GeneratedShort[] = report.clip_details.map((clip: ClipDetail) => ({
         id: clip.clip_number.toString(),
         title: `Clip ${clip.clip_number}: ${Math.floor(clip.start_time)}s - ${Math.floor(clip.end_time)}s`,
         thumbnailTime: clip.start_time,
@@ -330,7 +396,15 @@ export function VideoEditorLayout() {
       }));
 
       setGeneratedShorts(shorts);
-      
+
+      // Update final progress
+      setGenerationProgress(prev => ({
+        ...prev,
+        percentage: 100,
+        message: 'Complete!',
+        status: 'complete'
+      }));
+
       // Dismiss loading toast and show success
       if (progressToastId) {
         toast.dismiss(progressToastId);
@@ -339,12 +413,26 @@ export function VideoEditorLayout() {
 
     } catch (error) {
       console.error('Error generating shorts:', error);
+
+      // Update progress to error state
+      setGenerationProgress(prev => ({
+        ...prev,
+        status: 'error',
+        message: 'Error occurred during processing'
+      }));
+
       if (progressToastId) {
         toast.dismiss(progressToastId);
       }
       toast.error(`Failed to generate shorts: ${error instanceof Error ? error.message : 'Unknown error'}`);
+
     } finally {
       setIsGeneratingShorts(false);
+      setIsProgressMinimized(false);
+      // Clean up polling
+      if (pollInterval) {
+        clearInterval(pollInterval);
+      }
     }
   };
 
@@ -359,7 +447,7 @@ export function VideoEditorLayout() {
         trimStart: 0,
         trimEnd: 100,
       }));
-      
+
       // Wait for video to load then play
       setTimeout(() => {
         if (videoRef.current) {
@@ -371,7 +459,7 @@ export function VideoEditorLayout() {
           setVideoState((prev) => ({ ...prev, isPlaying: true }));
         }
       }, 100);
-      
+
       toast.success(`Playing: ${short.title}`);
     } else if (videoRef.current) {
       // Fallback to seeking in the original video
@@ -385,6 +473,57 @@ export function VideoEditorLayout() {
       videoRef.current.play();
       setVideoState((prev) => ({ ...prev, isPlaying: true }));
       toast.success(`Selected: ${short.title}`);
+    }
+  };
+
+
+  const handleDeleteShort = (shortId: string) => {
+    setGeneratedShorts((prevShorts) => {
+      // Filter out the deleted short
+      const filteredShorts = prevShorts.filter(short => short.id !== shortId);
+
+      // Renumber the remaining shorts
+      const renumberedShorts = filteredShorts.map((short, index) => ({
+        ...short,
+        id: (index + 1).toString(),
+        title: `Clip ${index + 1}: ${Math.floor(short.startTime)}s - ${Math.floor(short.endTime)}s`,
+      }));
+
+      return renumberedShorts;
+    });
+
+    toast.success('Clip deleted and clips renumbered');
+  };
+
+  const handleCleanupAll = async () => {
+    try {
+      // Call backend cleanup
+      const response = await apiService.cleanupAll();
+      
+      if (response.success) {
+        // Clear frontend state immediately
+        setGeneratedShorts([]);
+        setVideoState(prev => ({ ...prev, src: null })); // Optionally clear video if desired, or keep src
+        // Reset progress state
+        setGenerationProgress({
+          percentage: 0,
+          message: '',
+          threadsUsed: 0,
+          estimatedTimeRemaining: 0,
+          elapsedTime: 0,
+          totalClips: 0,
+          currentClip: 0,
+        });
+        
+        toast.success("All data cleaned up successfully");
+      } else {
+        toast.error(`Cleanup failed: ${response.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Cleanup error:', error);
+      toast.error('Failed to cleanup data');
+    } finally {
+      setShowDeleteConfirm(false);
     }
   };
 
@@ -637,56 +776,29 @@ export function VideoEditorLayout() {
 
   return (
     <div className="flex flex-col h-screen bg-background overflow-hidden">
-      {/* Header */}
-      <header className="flex items-center justify-between px-6 py-3 border-b border-border bg-card/50 backdrop-blur-sm">
-        <div className="flex items-center gap-4">
-          <Link to="/">
-            <Button variant="ghost" size="icon">
-              <ArrowLeft className="w-5 h-5" />
-            </Button>
-          </Link>
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <div className="absolute inset-0 bg-accent/30 rounded-lg blur-lg" />
-              <div className="relative w-10 h-10 rounded-lg bg-gradient-to-br from-accent to-primary flex items-center justify-center">
-                <Wand2 className="w-5 h-5 text-primary-foreground" />
-              </div>
-            </div>
-            <div>
-              <h1 className="text-xl font-bold">Video Editor</h1>
-              <p className="text-xs text-muted-foreground">PixelForge AI</p>
-            </div>
-          </div>
-        </div>
 
-        <div className="flex items-center gap-3">
-          <Select value={exportQuality} onValueChange={setExportQuality}>
-            <SelectTrigger className="w-48">
-              <SelectValue placeholder="Export Quality" />
-            </SelectTrigger>
-            <SelectContent>
-              {exportQualities.map((q) => (
-                <SelectItem key={q.value} value={q.value}>{q.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button onClick={handleExport} className="gap-2">
-            <Download className="w-4 h-4" />
-            Export
-          </Button>
-        </div>
-      </header>
 
       <div className="flex flex-1 overflow-hidden">
         {/* Left Sidebar - Tools */}
         <aside className="w-80 border-r border-border bg-card/30 backdrop-blur-sm overflow-y-auto scrollbar-thin">
+          {/* Back Button */}
+          <div className="p-4 border-b border-border/50">
+            <Link to="/">
+              <Button variant="ghost" size="sm" className="gap-2">
+                <ArrowLeft className="w-4 h-4" />
+                Back to Home
+              </Button>
+            </Link>
+          </div>
           <Tabs defaultValue="import" className="p-4">
-            <TabsList className="w-full grid grid-cols-5 mb-4">
-              <TabsTrigger value="import" className="text-xs px-1">Import</TabsTrigger>
-              <TabsTrigger value="adjust" className="text-xs px-1">Color</TabsTrigger>
-              <TabsTrigger value="transform" className="text-xs px-1">Transform</TabsTrigger>
-              <TabsTrigger value="effects" className="text-xs px-1">Effects</TabsTrigger>
-              <TabsTrigger value="audio" className="text-xs px-1">Audio</TabsTrigger>
+            <TabsList className="w-full grid grid-cols-7 mb-4 h-auto">
+              <TabsTrigger value="import" className="text-xs px-0.5 py-1">Import</TabsTrigger>
+              <TabsTrigger value="adjust" className="text-xs px-0.5 py-1">Color</TabsTrigger>
+              <TabsTrigger value="transform" className="text-xs px-0.5 py-1">Transform</TabsTrigger>
+              <TabsTrigger value="effects" className="text-xs px-0.5 py-1">Effects</TabsTrigger>
+              <TabsTrigger value="audio" className="text-xs px-0.5 py-1">Audio</TabsTrigger>
+              <TabsTrigger value="text" className="text-xs px-0.5 py-1">Text</TabsTrigger>
+              <TabsTrigger value="advanced" className="text-xs px-0.5 py-1">Advanced</TabsTrigger>
             </TabsList>
 
             <TabsContent value="import" className="space-y-4">
@@ -721,7 +833,7 @@ export function VideoEditorLayout() {
                 {/* YouTube Import */}
                 <div className="space-y-2">
                   <h3 className="text-xs font-medium flex items-center gap-1.5">
-                    <Youtube className="w-3.5 h-3.5 text-red-500" />
+                    <PlayCircle className="w-3.5 h-3.5 text-red-500" />
                     YouTube
                   </h3>
                   <Button
@@ -935,7 +1047,7 @@ export function VideoEditorLayout() {
                   { icon: MonitorPlay, label: 'Picture-in-Picture', action: 'pip' },
                   { icon: Film, label: 'Slow Motion', action: 'slowmo' },
                   { icon: Zap, label: 'Stabilize', action: 'stabilize' },
-                ].map(({ icon: Icon, label, action }) => (
+                ].map(({ icon: Icon, label }) => (
                   <Button
                     key={label}
                     variant="outline"
@@ -1063,252 +1175,710 @@ export function VideoEditorLayout() {
                 Normalize Audio
               </Button>
             </TabsContent>
+
+            <TabsContent value="text" className="space-y-4">
+              <div className="space-y-3">
+                <div className="p-3 rounded-lg bg-accent/10 border border-accent/20">
+                  <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
+                    <Type className="w-4 h-4 text-accent" />
+                    Text & Captions
+                  </h4>
+                  <p className="text-xs text-muted-foreground">Add text overlays and captions to your video</p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Add Text Overlay</label>
+                  <Input placeholder="Enter text..." className="text-sm" />
+                  <Button className="w-full gap-2 text-xs">
+                    <Type className="w-3.5 h-3.5" />
+                    Add Text
+                  </Button>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Font Style</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {['Bold', 'Italic', 'Underline', 'Outline'].map((style) => (
+                      <Button
+                        key={style}
+                        variant="outline"
+                        size="sm"
+                        className="text-xs"
+                        onClick={() => toast.info(`${style} text style applied`)}
+                      >
+                        {style}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Auto Captions</label>
+                  <Button 
+                    variant="secondary" 
+                    className="w-full gap-2 text-xs"
+                    onClick={() => toast.info('Generating captions using AI speech recognition...')}
+                  >
+                    <Subtitles className="w-3.5 h-3.5" />
+                    Generate Captions
+                  </Button>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Caption Style</label>
+                  <Select>
+                    <SelectTrigger className="text-xs">
+                      <SelectValue placeholder="Choose caption style" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="white">White with Shadow</SelectItem>
+                      <SelectItem value="black">Black with Border</SelectItem>
+                      <SelectItem value="custom">Custom Color</SelectItem>
+                      <SelectItem value="background">Full Background</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="advanced" className="space-y-4">
+              <div className="space-y-3">
+                <div className="p-3 rounded-lg bg-primary/10 border border-primary/20">
+                  <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-primary" />
+                    Advanced Tools
+                  </h4>
+                  <p className="text-xs text-muted-foreground">Professional video editing features</p>
+                </div>
+
+                {/* Keyframe Animation */}
+                <div className="space-y-2">
+                  <h5 className="text-xs font-semibold flex items-center gap-2">
+                    <Clock className="w-3.5 h-3.5" />
+                    Keyframe Animation
+                  </h5>
+                  <Button
+                    variant="outline"
+                    className="w-full gap-2 text-xs"
+                    onClick={() => toast.info('Keyframe markers added at current time')}
+                  >
+                    <Clock className="w-3.5 h-3.5" />
+                    Add Keyframe
+                  </Button>
+                </div>
+
+                {/* Motion Blur */}
+                <div className="space-y-2">
+                  <label className="text-xs font-medium flex items-center gap-2">
+                    <Move className="w-3.5 h-3.5" />
+                    Motion Blur
+                  </label>
+                  <Slider
+                    value={[0]}
+                    min={0}
+                    max={100}
+                    step={1}
+                    onValueChange={() => {}}
+                  />
+                </div>
+
+                {/* Color Lookup Table */}
+                <div className="space-y-2">
+                  <h5 className="text-xs font-semibold flex items-center gap-2">
+                    <Palette className="w-3.5 h-3.5" />
+                    LUT (Color Lookup Table)
+                  </h5>
+                  <Select>
+                    <SelectTrigger className="text-xs">
+                      <SelectValue placeholder="Select LUT" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None</SelectItem>
+                      <SelectItem value="cinematic">Cinematic</SelectItem>
+                      <SelectItem value="retro">Retro Film</SelectItem>
+                      <SelectItem value="scifi">Sci-Fi</SelectItem>
+                      <SelectItem value="nature">Nature</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* Video Stabilization */}
+                <Button
+                  variant={videoState.effects.stabilize ? 'default' : 'outline'}
+                  className="w-full gap-2 text-xs"
+                  onClick={() => setVideoState(prev => ({
+                    ...prev,
+                    effects: { ...prev.effects, stabilize: !prev.effects.stabilize }
+                  }))}
+                >
+                  <Move className="w-3.5 h-3.5" />
+                  {videoState.effects.stabilize ? 'Stabilization: ON' : 'Video Stabilization'}
+                </Button>
+
+                {/* Quality Enhancement */}
+                <Button
+                  variant="outline"
+                  className="w-full gap-2 text-xs"
+                  onClick={() => toast.info('Applying AI upscaling to enhance video quality...')}
+                >
+                  <Gauge className="w-3.5 h-3.5" />
+                  AI Quality Enhance
+                </Button>
+
+                {/* Chromatic Aberration */}
+                <div className="space-y-2">
+                  <label className="text-xs font-medium">Chromatic Aberration</label>
+                  <Slider
+                    value={[0]}
+                    min={0}
+                    max={50}
+                    step={1}
+                    onValueChange={() => {}}
+                  />
+                </div>
+
+                {/* Transition Library */}
+                <div className="space-y-2">
+                  <h5 className="text-xs font-semibold flex items-center gap-2">
+                    <Layers className="w-3.5 h-3.5" />
+                    Transitions
+                  </h5>
+                  <Select>
+                    <SelectTrigger className="text-xs">
+                      <SelectValue placeholder="Select transition" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="fade">Fade</SelectItem>
+                      <SelectItem value="crossfade">Cross Fade</SelectItem>
+                      <SelectItem value="slideL">Slide Left</SelectItem>
+                      <SelectItem value="slideR">Slide Right</SelectItem>
+                      <SelectItem value="zoom">Zoom</SelectItem>
+                      <SelectItem value="blur">Blur Transition</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            </TabsContent>
           </Tabs>
         </aside>
 
         {/* Main Content */}
-        <main className="flex-1 flex flex-col bg-gradient-to-br from-background via-secondary/5 to-background">
-          {/* Video Preview - Responsive height based on fullscreen */}
-          <div className={cn(
-            "p-6 flex items-center justify-center bg-gradient-to-br from-black/80 via-black/60 to-black/80 relative overflow-hidden border-b-2 border-primary/20 transition-all duration-300",
-            isFullscreen ? "h-full" : "h-1/2 mb-4"
-          )}>
-            {/* Decorative background elements */}
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(var(--primary-rgb,120,119,198),0.1),transparent_50%)]" />
-            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-primary/50 to-transparent" />
-            
-            {videoState.src ? (
-              <div 
-                className="relative max-h-full max-w-full cursor-pointer group"
-                onMouseEnter={handleVideoMouseEnter}
-                onMouseLeave={handleVideoMouseLeave}
-                onMouseMove={handleVideoMouseMove}
-                onClick={handleVideoClick}
-              >
-                <video
-                  ref={videoRef}
-                  src={videoState.src}
-                  className="max-h-full max-w-full rounded-xl shadow-2xl shadow-primary/20 border border-primary/20 transition-transform"
-                  style={{ 
-                    filter: getVideoFilters(),
-                    transform: getVideoTransform(),
-                  }}
-                  onTimeUpdate={handleTimeUpdate}
-                  onLoadedMetadata={handleLoadedMetadata}
-                  onEnded={() => setVideoState((prev) => ({ ...prev, isPlaying: false }))}
-                  muted={videoState.isMuted}
-                />
-                
-                {/* Video overlay info - always visible */}
-                <div className="absolute top-4 left-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-black/60 backdrop-blur-md border border-white/10">
-                  <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                  <span className="text-xs font-medium text-white">LIVE PREVIEW</span>
-                </div>
+        <main className="flex-1 flex flex-col bg-gradient-to-br from-background via-secondary/5 to-background overflow-hidden">
+          {isFullscreen ? (
+            // Fullscreen mode - video takes full space of the middle area only
+            <div className={cn(
+              "relative w-full h-full flex items-center justify-center bg-gradient-to-br from-black/80 via-black/60 to-black/80 p-0"
+            )}>
+              {/* Decorative background */}
+              <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(var(--primary-rgb,120,119,198),0.1),transparent_50%)]" />
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-primary/50 to-transparent" />
+              
+              {videoState.src ? (
+                <div 
+                  className="relative w-full h-full flex items-center justify-center cursor-pointer group"
+                  onMouseEnter={handleVideoMouseEnter}
+                  onMouseLeave={handleVideoMouseLeave}
+                  onMouseMove={handleVideoMouseMove}
+                  onClick={handleVideoClick}
+                >
+                  <div className="relative max-w-full max-h-full flex items-center justify-center">
+                    <video
+                      ref={videoRef}
+                      src={videoState.src}
+                      className="w-auto h-auto max-w-full max-h-full rounded-xl shadow-2xl shadow-primary/20 border border-primary/20 transition-transform"
+                      style={{ 
+                        filter: getVideoFilters(),
+                        transform: getVideoTransform(),
+                        objectFit: 'contain',
+                      }}
+                      onTimeUpdate={handleTimeUpdate}
+                      onLoadedMetadata={handleLoadedMetadata}
+                      onEnded={() => setVideoState((prev) => ({ ...prev, isPlaying: false }))}
+                      muted={videoState.isMuted}
+                    />
+                  </div>
+                  
+                  {/* Overlay info */}
+                  <div className="absolute top-4 left-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-black/60 backdrop-blur-md border border-white/10">
+                    <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                    <span className="text-xs font-medium text-white">LIVE PREVIEW</span>
+                  </div>
+                  
+                  {/* Close Button */}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="absolute top-4 right-4 bg-black/60 backdrop-blur-md border border-white/10 rounded-lg w-8 h-8"
+                    onClick={toggleFullscreen}
+                  >
+                    <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </Button>
 
-                {/* Play/Pause overlay - shows when paused */}
-                {!videoState.isPlaying && (
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="w-20 h-20 rounded-full bg-primary/90 backdrop-blur-sm flex items-center justify-center shadow-2xl border-4 border-white/20 group-hover:scale-110 transition-transform">
-                      <Play className="w-10 h-10 text-white fill-white ml-1" />
+                  {/* Play overlay */}
+                  {!videoState.isPlaying && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="w-20 h-20 rounded-full bg-primary/90 backdrop-blur-sm flex items-center justify-center shadow-2xl border-4 border-white/20 group-hover:scale-110 transition-transform">
+                        <Play className="w-10 h-10 text-white fill-white ml-1" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
+              {/* Player Controls - Always show in fullscreen */}
+              {videoState.src && (
+                <div
+                  className={cn(
+                    "absolute bottom-16 left-6 right-6 p-4 border-2 border-primary/20 bg-gradient-to-br from-card/95 to-card/90 backdrop-blur-md rounded-xl shadow-2xl shadow-primary/10 transition-all duration-300",
+                    showVideoControls ? "opacity-100" : "opacity-0 pointer-events-none"
+                  )}
+                >
+                  <div className="mb-3">
+                    <Slider
+                      value={[videoState.currentTime]}
+                      min={0}
+                      max={videoState.duration || 100}
+                      step={0.1}
+                      onValueChange={handleSeek}
+                      className="cursor-pointer"
+                    />
+                    <div className="flex justify-between text-xs text-muted-foreground mt-1.5">
+                      <span className="tabular-nums">{formatTime(videoState.currentTime)}</span>
+                      <span className="tabular-nums">{formatTime(videoState.duration)}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleSeek([0])}>
+                        <SkipBack className="w-4 h-4" />
+                      </Button>
+                      <Button size="icon" className="h-9 w-9" onClick={togglePlay}>
+                        {videoState.isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                      </Button>
+                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleSeek([videoState.duration])}>
+                        <SkipForward className="w-4 h-4" />
+                      </Button>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      {/* Volume Control */}
+                      <div className="flex items-center gap-2">
+                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={toggleMute}>
+                          {videoState.isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                        </Button>
+                        <Slider
+                          value={[videoState.isMuted ? 0 : videoState.volume]}
+                          min={0}
+                          max={1}
+                          step={0.1}
+                          onValueChange={handleVolumeChange}
+                          className="w-20"
+                        />
+                      </div>
+
+                      {/* Export Controls */}
+                      <div className="flex items-center gap-2">
+                        <Select value={exportQuality} onValueChange={setExportQuality}>
+                          <SelectTrigger className="w-32 h-8">
+                            <SelectValue placeholder="Quality" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {exportQualities.map((q) => (
+                              <SelectItem key={q.value} value={q.value}>{q.label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Button 
+                          onClick={handleExport} 
+                          size="sm"
+                          className="gap-1 h-8"
+                        >
+                          <Download className="w-3 h-3" />
+                          Export
+                        </Button>
+                      </div>
+
+                      {/* Exit Fullscreen Button */}
+                      <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        className="h-8 w-8" 
+                        onClick={toggleFullscreen}
+                        title="Exit Fullscreen"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            // Normal mode - split 50/50
+            <>
+              {/* Top Half - Video Preview Container */}
+              <div className="h-1/2 flex items-center justify-center bg-gradient-to-br from-black/80 via-black/60 to-black/80 relative overflow-hidden border-b border-primary/20 p-6">
+                {/* Decorative background */}
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(var(--primary-rgb,120,119,198),0.1),transparent_50%)]" />
+                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-primary/50 to-transparent" />
+                
+                {videoState.src ? (
+                  <div 
+                    className="relative w-full h-full flex items-center justify-center cursor-pointer group rounded-3xl bg-white/10 backdrop-blur-sm border border-white/20 shadow-2xl shadow-primary/20 overflow-hidden"
+                    onMouseEnter={handleVideoMouseEnter}
+                    onMouseLeave={handleVideoMouseLeave}
+                    onMouseMove={handleVideoMouseMove}
+                    onClick={handleVideoClick}
+                  >
+                    <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
+                      <video
+                        ref={videoRef}
+                        src={videoState.src}
+                        className="w-full h-full transition-transform"
+                        style={{
+                          filter: getVideoFilters(),
+                          transform: getVideoTransform(),
+                          objectFit: 'contain',
+                        }}
+                        onTimeUpdate={handleTimeUpdate}
+                        onLoadedMetadata={handleLoadedMetadata}
+                        onEnded={() => setVideoState((prev) => ({ ...prev, isPlaying: false }))}
+                        muted={videoState.isMuted}
+                      />
+                    </div>
+                    
+                    {/* Overlay info */}
+                    <div className="absolute top-4 left-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-black/60 backdrop-blur-md border border-white/10">
+                      <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                      <span className="text-xs font-medium text-white">LIVE PREVIEW</span>
+                    </div>
+
+                    {/* Play overlay */}
+                    {!videoState.isPlaying && (
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="w-20 h-20 rounded-full bg-primary/90 backdrop-blur-sm flex items-center justify-center shadow-2xl border-4 border-white/20 group-hover:scale-110 transition-transform">
+                          <Play className="w-10 h-10 text-white fill-white ml-1" />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-center relative z-10 px-6">
+                    <div className="w-24 h-24 rounded-2xl bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center mx-auto mb-6 border border-primary/20 shadow-lg">
+                      <Upload className="w-10 h-10 text-primary" />
+                    </div>
+                    <h3 className="text-2xl font-bold mb-2 bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent">
+                      Professional Video Editor
+                    </h3>
+                    <p className="text-sm text-muted-foreground mb-6 max-w-md mx-auto">
+                      Import your video to start editing with AI-powered tools and effects
+                    </p>
+                    <div className="flex gap-3 justify-center">
+                      <Button 
+                        size="lg"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="gap-2 shadow-lg"
+                      >
+                        <Upload className="w-4 h-4" />
+                        Upload Video
+                      </Button>
+                      <Button 
+                        size="lg"
+                        variant="outline" 
+                        onClick={() => document.getElementById('yt-input')?.focus()}
+                        className="gap-2 border-primary/30 hover:bg-primary/10"
+                      >
+                        <Youtube className="w-4 h-4" />
+                        Import from YouTube
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Player Controls - Only show if not fullscreen */}
+                {videoState.src && (
+                  <div 
+                    className={cn(
+                      "absolute bottom-4 left-4 right-4 p-3 border-2 border-primary/20 bg-gradient-to-br from-card/95 to-card/90 backdrop-blur-md rounded-xl shadow-2xl shadow-primary/10 transition-all duration-300",
+                      showVideoControls ? "opacity-100" : "opacity-0 pointer-events-none"
+                    )}
+                  >
+                    <div className="mb-2">
+                      <Slider
+                        value={[videoState.currentTime]}
+                        min={0}
+                        max={videoState.duration || 100}
+                        step={0.1}
+                        onValueChange={handleSeek}
+                        className="cursor-pointer"
+                      />
+                      <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                        <span className="tabular-nums">{formatTime(videoState.currentTime)}</span>
+                        <span className="tabular-nums">{formatTime(videoState.duration)}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleSeek([0])}>
+                          <SkipBack className="w-4 h-4" />
+                        </Button>
+                        <Button size="icon" className="h-9 w-9" onClick={togglePlay}>
+                          {videoState.isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                        </Button>
+                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleSeek([videoState.duration])}>
+                          <SkipForward className="w-4 h-4" />
+                        </Button>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {/* Volume Control */}
+                        <div className="flex items-center gap-2">
+                          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={toggleMute}>
+                            {videoState.isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                          </Button>
+                          <Slider
+                            value={[videoState.isMuted ? 0 : videoState.volume]}
+                            min={0}
+                            max={1}
+                            step={0.1}
+                            onValueChange={handleVolumeChange}
+                            className="w-20"
+                          />
+                        </div>
+
+                        {/* Export Controls */}
+                        <div className="flex items-center gap-2">
+                          <Select value={exportQuality} onValueChange={setExportQuality}>
+                            <SelectTrigger className="w-32 h-8">
+                              <SelectValue placeholder="Quality" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {exportQualities.map((q) => (
+                                <SelectItem key={q.value} value={q.value}>{q.label}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Button 
+                            onClick={handleExport} 
+                            size="sm"
+                            className="gap-1 h-8"
+                          >
+                            <Download className="w-3 h-3" />
+                            Export
+                          </Button>
+                        </div>
+
+                        {/* Fullscreen Button */}
+                        <Button 
+                          variant="ghost" 
+                          size="icon" 
+                          className="h-8 w-8" 
+                          onClick={toggleFullscreen}
+                          title="Fullscreen"
+                        >
+                          <Maximize2 className="w-4 h-4" />
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 )}
               </div>
-            ) : (
-              <div className="text-center relative z-10">
-                <div className="w-24 h-24 rounded-2xl bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center mx-auto mb-6 border border-primary/20 shadow-lg">
-                  <Upload className="w-10 h-10 text-primary" />
-                </div>
-                <h3 className="text-2xl font-bold mb-2 bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent">
-                  Professional Video Editor
-                </h3>
-                <p className="text-sm text-muted-foreground mb-6 max-w-md mx-auto">
-                  Import your video to start editing with AI-powered tools and effects
-                </p>
-                <div className="flex gap-3 justify-center">
-                  <Button 
-                    size="lg"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="gap-2 shadow-lg"
-                  >
-                    <Upload className="w-4 h-4" />
-                    Upload Video
-                  </Button>
-                  <Button 
-                    size="lg"
-                    variant="outline" 
-                    onClick={() => document.getElementById('yt-input')?.focus()}
-                    className="gap-2 border-primary/30 hover:bg-primary/10"
-                  >
-                    <Youtube className="w-4 h-4" />
-                    Import from YouTube
-                  </Button>
-                </div>
-              </div>
-            )}
-          </div>
 
-          {/* Shorts Showcase - Bottom Half - Hidden in fullscreen */}
-          {!isFullscreen && (
-            <div className="h-1/2 border-t-2 border-primary/20 bg-gradient-to-b from-card/50 to-secondary/30 backdrop-blur-sm">
-              <ShortsShowcase
-                isGenerating={isGeneratingShorts}
-                shorts={generatedShorts}
-                onSelectShort={handleSelectShort}
-                onRegenerateShorts={generateShorts}
-                videoSrc={importSource === 'youtube' ? videoState.src : null}
-              />
-            </div>
-          )}
+              {/* Bottom Half - Shorts Showcase */}
+              <div className="h-1/2 flex flex-col bg-gradient-to-b from-card/50 to-secondary/30 backdrop-blur-sm overflow-hidden border-t border-primary/20">
+                {generatedShorts.length > 0 ? (
 
-          {/* Timeline & Controls - Floating */}
-          {videoState.src && (
-            <div 
-              className={cn(
-                "absolute left-80 right-80 mx-4 p-4 border-2 border-primary/20 bg-gradient-to-br from-card/95 to-card/90 backdrop-blur-md rounded-xl shadow-2xl shadow-primary/10 transition-all duration-300",
-                showVideoControls ? "opacity-100" : "opacity-0 pointer-events-none",
-                isFullscreen ? "bottom-8" : "bottom-1/2 translate-y-1/2"
-              )}
-            >
-             <div className="mb-3">
-                <Slider
-                  value={[videoState.currentTime]}
-                  min={0}
-                  max={videoState.duration || 100}
-                  step={0.1}
-                  onValueChange={handleSeek}
-                  className="cursor-pointer"
-                />
-                <div className="flex justify-between text-xs text-muted-foreground mt-1.5">
-                  <span className="tabular-nums">{formatTime(videoState.currentTime)}</span>
-                  <span className="tabular-nums">{formatTime(videoState.duration)}</span>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleSeek([0])}>
-                    <SkipBack className="w-4 h-4" />
-                  </Button>
-                  <Button size="icon" className="h-9 w-9" onClick={togglePlay}>
-                    {videoState.isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                  </Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleSeek([videoState.duration])}>
-                    <SkipForward className="w-4 h-4" />
-                  </Button>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  {/* Volume Control */}
-                  <div className="flex items-center gap-2">
-                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={toggleMute}>
-                      {videoState.isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                    </Button>
-                    <Slider
-                      value={[videoState.isMuted ? 0 : videoState.volume]}
-                      min={0}
-                      max={1}
-                      step={0.1}
-                      onValueChange={handleVolumeChange}
-                      className="w-20"
-                    />
+                  <ShortsShowcase
+                    isGenerating={isGeneratingShorts}
+                    shorts={generatedShorts}
+                    onSelectShort={handleSelectShort}
+                    onRegenerateShorts={generateShorts}
+                    onDeleteShort={handleDeleteShort}
+                    onDeleteAll={() => setShowDeleteConfirm(true)}
+                    videoSrc={importSource === 'youtube' ? videoState.src : null}
+                    gridLayout={true}
+                  />
+                ) : (
+                  <div className="flex-1 flex items-center justify-center">
+                    <div className="text-center">
+                      <Film className="w-12 h-12 text-muted-foreground mx-auto mb-3" />
+                      <p className="text-sm text-muted-foreground">
+                        {isGeneratingShorts ? 'Generating AI shorts...' : 'Import a YouTube video to generate AI shorts'}
+                      </p>
+                    </div>
                   </div>
-
-                  {/* Fullscreen Button */}
-                  <Button 
-                    variant="ghost" 
-                    size="icon" 
-                    className="h-8 w-8" 
-                    onClick={toggleFullscreen}
-                    title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
-                  >
-                    {isFullscreen ? (
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    ) : (
-                      <Maximize2 className="w-4 h-4" />
-                    )}
-                  </Button>
-                </div>
+                )}
               </div>
-            </div>
+            </>
           )}
         </main>
 
         {/* Right Sidebar - AI Assistant */}
-        <aside className="w-72 border-l border-border bg-card/30 backdrop-blur-sm flex flex-col">
-          <div className="p-4 border-b border-border">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center">
-                <Bot className="w-5 h-5 text-primary" />
-              </div>
-              <div>
-                <h3 className="font-semibold">AI Assistant</h3>
-                <p className="text-xs text-muted-foreground">Let AI handle your edits</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex-1 p-4 overflow-y-auto">
-            <div className="space-y-4">
-              <div className="p-3 rounded-lg bg-primary/10 border border-primary/20">
-                <div className="flex items-center gap-2 mb-2">
-                  <Sparkles className="w-4 h-4 text-primary" />
-                  <span className="text-sm font-medium">Having trouble?</span>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Describe what you want and let AI make the adjustments.
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-sm font-medium">What would you like to do?</label>
-                <textarea
-                  value={aiPrompt}
-                  onChange={(e) => setAiPrompt(e.target.value)}
-                  placeholder="E.g., 'Make it cinematic' or 'Add slow motion effect'"
-                  className="w-full h-20 p-3 text-sm rounded-lg bg-secondary/50 border border-border resize-none focus:outline-none focus:ring-2 focus:ring-primary"
-                />
-                <Button
-                  className="w-full gap-2"
-                  onClick={handleAITakeover}
-                  disabled={isAIProcessing || !videoState.src}
-                >
-                  {isAIProcessing ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                      Processing...
-                    </>
-                  ) : (
-                    <>
-                      <Wand2 className="w-4 h-4" />
-                      Apply AI Edits
-                    </>
-                  )}
-                </Button>
-              </div>
-
-              {/* Quick Presets */}
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Quick Presets</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {['Cinematic', 'Warm', 'Cool', 'Vibrant', 'Vintage', 'Slow-Mo'].map((preset) => (
-                    <Button
-                      key={preset}
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setAiPrompt(`Make it ${preset.toLowerCase()}`)}
-                    >
-                      {preset}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
+        <aside className="w-80 border-l border-border bg-card/30 backdrop-blur-sm flex flex-col hidden lg:flex">
+          <VideoAIAssistant
+            isProcessing={isAIProcessing}
+            onAICommand={handleAITakeover}
+            currentAdjustments={videoState.adjustments}
+          />
         </aside>
       </div>
+
+
+      {/* Progress Modal */}
+      {isGeneratingShorts && !isProgressMinimized && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-card border border-primary/20 rounded-2xl shadow-2xl p-8 max-w-md w-full mx-4 relative">
+             <Button
+              variant="ghost"
+              size="icon"
+              className="absolute top-2 right-2 text-muted-foreground hover:text-foreground"
+              onClick={() => setIsProgressMinimized(true)}
+              title="Run in Background"
+            >
+              <Minimize2 className="w-4 h-4" />
+            </Button>
+            {/* Header */}
+            <div className="mb-6">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
+                <h3 className="text-lg font-semibold">Generating Shorts</h3>
+              </div>
+              <p className="text-sm text-muted-foreground">{generationProgress.message}</p>
+            </div>
+
+            {/* Progress Bar */}
+            <div className="mb-6">
+              <div className="w-full bg-secondary/50 rounded-full h-3 overflow-hidden border border-primary/10">
+                <div
+                  className="h-full bg-gradient-to-r from-primary via-accent to-primary transition-all duration-300"
+                  style={{ width: `${generationProgress.percentage}%` }}
+                />
+              </div>
+              <div className="flex justify-between items-center mt-2">
+                <span className="text-xs font-medium text-foreground">{generationProgress.percentage}%</span>
+                <span className="text-xs text-muted-foreground">
+                  {generationProgress.currentClip}/{generationProgress.totalClips} clips
+                </span>
+              </div>
+            </div>
+
+
+            {/* Statistics Grid */}
+            <div className="grid grid-cols-2 gap-4 mb-6">
+              {/* Threads Used */}
+              <div className="bg-secondary/30 rounded-lg p-3 border border-primary/10">
+                <div className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
+                  <Zap className="w-3 h-3" />
+                  Threads
+                </div>
+                <div className="text-lg font-bold text-primary">
+                  {generationProgress.threadsUsed || 0}
+                </div>
+              </div>
+
+              {/* Estimated Time */}
+              <div className="bg-secondary/30 rounded-lg p-3 border border-primary/10">
+                <div className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
+                  <Clock className="w-3 h-3" />
+                  ETA
+                </div>
+                <div className="text-lg font-bold text-accent">
+                  {generationProgress.estimatedTimeRemaining || 0}s
+                </div>
+              </div>
+
+              {/* Elapsed Time */}
+              <div className="bg-secondary/30 rounded-lg p-3 border border-primary/10">
+                <div className="text-xs text-muted-foreground mb-1">Elapsed</div>
+                <div className="text-lg font-bold text-foreground">
+                  {generationProgress.elapsedTime || 0}s
+                </div>
+              </div>
+
+              {/* Current Clip */}
+              <div className="bg-secondary/30 rounded-lg p-3 border border-primary/10">
+                <div className="text-xs text-muted-foreground mb-1">Processing</div>
+                <div className="text-lg font-bold text-primary">
+                  Clip {generationProgress.currentClip || 0}
+                </div>
+              </div>
+            </div>
+
+
+            {/* Info Message */}
+            <div className="p-3 rounded-lg bg-primary/5 border border-primary/20 text-xs text-muted-foreground mb-4">
+              <p className="flex items-start gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-primary mt-0.5 flex-shrink-0" />
+                <span>
+                  {generationProgress.threadsUsed > 1 
+                    ? `Processing with ${generationProgress.threadsUsed} parallel threads for faster generation`
+                    : 'Processing video clips...'}
+                </span>
+              </p>
+            </div>
+            
+            <Button 
+                variant="outline" 
+                className="w-full gap-2"
+                onClick={() => setIsProgressMinimized(true)}
+            >
+                <Minimize2 className="w-4 h-4" />
+                Run in Background
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Minimized Progress Indicator */}
+      {isGeneratingShorts && isProgressMinimized && (
+        <div 
+          className="fixed bottom-6 right-6 z-50 bg-card/90 backdrop-blur-md border border-primary/20 rounded-xl shadow-2xl p-4 cursor-pointer hover:bg-card transition-all w-64 animate-in slide-in-from-bottom-5"
+          onClick={() => setIsProgressMinimized(false)}
+        >
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+               <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+               <span className="text-xs font-semibold">Generating...</span>
+            </div>
+             <span className="text-xs font-bold text-primary">{generationProgress.percentage}%</span>
+          </div>
+          
+           <div className="w-full bg-secondary/50 rounded-full h-1.5 overflow-hidden mb-1">
+                <div
+                  className="h-full bg-gradient-to-r from-primary via-accent to-primary transition-all duration-300"
+                  style={{ width: `${generationProgress.percentage}%` }}
+                />
+           </div>
+           <p className="text-[10px] text-muted-foreground truncate">{generationProgress.message}</p>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete All Data?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete all generated clips and source files? This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={handleCleanupAll}
+              className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
+            >
+              Yes, Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
