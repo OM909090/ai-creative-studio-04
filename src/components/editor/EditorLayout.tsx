@@ -7,9 +7,10 @@ import { FilterPanel } from './FilterPanel';
 import { Canvas } from './Canvas';
 import { AIAssistant } from './AIAssistant';
 import { ExportSettings } from './ExportSettings';
+import { AdvancedImageTools } from './AdvancedImageTools';
 import { ChatMessage, ImageAdjustments } from '@/types/editor';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Sliders, Wand2, PanelRightOpen, PanelRightClose, ArrowLeft } from 'lucide-react';
+import { Sliders, Wand2, PanelRightOpen, PanelRightClose, ArrowLeft, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -166,14 +167,18 @@ export function EditorLayout({ mode = 'image' }: EditorLayoutProps) {
         {/* Left Sidebar - Tools */}
         <aside className="w-72 border-r border-border bg-card/30 backdrop-blur-sm overflow-y-auto scrollbar-thin hidden md:block">
           <Tabs defaultValue="adjustments" className="p-4">
-            <TabsList className="w-full grid grid-cols-2 mb-4">
-              <TabsTrigger value="adjustments" className="gap-2">
+            <TabsList className="w-full grid grid-cols-3 mb-4">
+              <TabsTrigger value="adjustments" className="gap-1">
                 <Sliders className="w-4 h-4" />
-                Adjust
+                <span className="hidden lg:inline">Adjust</span>
               </TabsTrigger>
-              <TabsTrigger value="filters" className="gap-2">
+              <TabsTrigger value="filters" className="gap-1">
                 <Wand2 className="w-4 h-4" />
-                Filters
+                <span className="hidden lg:inline">Filters</span>
+              </TabsTrigger>
+              <TabsTrigger value="advanced" className="gap-1">
+                <Sparkles className="w-4 h-4" />
+                <span className="hidden lg:inline">Advanced</span>
               </TabsTrigger>
             </TabsList>
             <TabsContent value="adjustments" className="mt-0">
@@ -187,6 +192,17 @@ export function EditorLayout({ mode = 'image' }: EditorLayoutProps) {
                 activeFilter={editor.state.activeFilter}
                 onFilterSelect={editor.applyFilter}
                 imageUrl={editor.state.image}
+              />
+            </TabsContent>
+            <TabsContent value="advanced" className="mt-0">
+              <AdvancedImageTools
+                onApplyTool={(tool) => {
+                  if (tool === 'reset') {
+                    editor.reset();
+                  } else {
+                    toast.success(`${tool} applied!`);
+                  }
+                }}
               />
             </TabsContent>
           </Tabs>

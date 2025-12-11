@@ -1,0 +1,20 @@
+# Optimized Backend Manager Requirements
+# Install with: pip install -r requirements_optimized.txt
+
+# Core video processing
+moviepy>=1.0.3
+yt-dlp>=2023.7.6
+
+# Web framework
+flask>=2.3.0
+flask-cors>=4.0.0
+
+# System monitoring
+psutil>=5.9.0
+
+# Data processing
+numpy>=1.24.0
+
+# Optional: For enhanced video analysis
+# opencv-python>=4.8.0
+# scikit-image>=0.21.0
